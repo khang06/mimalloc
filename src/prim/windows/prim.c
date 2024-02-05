@@ -51,6 +51,9 @@ typedef NTSTATUS (__stdcall *PNtAllocateVirtualMemoryEx)(HANDLE, PVOID*, SIZE_T*
 static PVirtualAlloc2 pVirtualAlloc2 = NULL;
 static PNtAllocateVirtualMemoryEx pNtAllocateVirtualMemoryEx = NULL;
 
+extern PVOID WeirdVirtualAlloc(LPVOID, SIZE_T, DWORD, DWORD);
+extern BOOL WeirdVirtualFree(LPVOID, SIZE_T, DWORD);
+
 // Similarly, GetNumaProcesorNodeEx is only supported since Windows 7
 typedef struct MI_PROCESSOR_NUMBER_S { WORD Group; BYTE Number; BYTE Reserved; } MI_PROCESSOR_NUMBER;
 
@@ -156,7 +159,7 @@ void _mi_prim_mem_init( mi_os_mem_config_t* config )
 int _mi_prim_free(void* addr, size_t size ) {
   MI_UNUSED(size);
   DWORD errcode = 0;
-  bool err = (VirtualFree(addr, 0, MEM_RELEASE) == 0);
+  bool err = (WeirdVirtualFree(addr, 0, MEM_RELEASE) == 0);
   if (err) { errcode = GetLastError(); }
   if (errcode == ERROR_INVALID_ADDRESS) {
     // In mi_os_mem_alloc_aligned the fallback path may have returned a pointer inside
@@ -166,7 +169,7 @@ int _mi_prim_free(void* addr, size_t size ) {
     VirtualQuery(addr, &info, sizeof(info));
     if (info.AllocationBase < addr && ((uint8_t*)addr - (uint8_t*)info.AllocationBase) < (ptrdiff_t)MI_SEGMENT_SIZE) {
       errcode = 0;
-      err = (VirtualFree(info.AllocationBase, 0, MEM_RELEASE) == 0);
+      err = (WeirdVirtualFree(info.AllocationBase, 0, MEM_RELEASE) == 0);
       if (err) { errcode = GetLastError(); }
     }
   }
@@ -179,32 +182,7 @@ int _mi_prim_free(void* addr, size_t size ) {
 //---------------------------------------------
 
 static void* win_virtual_alloc_prim(void* addr, size_t size, size_t try_alignment, DWORD flags) {
-  #if (MI_INTPTR_SIZE >= 8)
-  // on 64-bit systems, try to use the virtual address area after 2TiB for 4MiB aligned allocations
-  if (addr == NULL) {
-    void* hint = _mi_os_get_aligned_hint(try_alignment,size);
-    if (hint != NULL) {
-      void* p = VirtualAlloc(hint, size, flags, PAGE_READWRITE);
-      if (p != NULL) return p;
-      _mi_verbose_message("warning: unable to allocate hinted aligned OS memory (%zu bytes, error code: 0x%x, address: %p, alignment: %zu, flags: 0x%x)\n", size, GetLastError(), hint, try_alignment, flags);
-      // fall through on error
-    }
-  }
-  #endif
-  // on modern Windows try use VirtualAlloc2 for aligned allocation
-  if (try_alignment > 1 && (try_alignment % _mi_os_page_size()) == 0 && pVirtualAlloc2 != NULL) {
-    MI_MEM_ADDRESS_REQUIREMENTS reqs = { 0, 0, 0 };
-    reqs.Alignment = try_alignment;
-    MI_MEM_EXTENDED_PARAMETER param = { {0, 0}, {0} };
-    param.Type.Type = MiMemExtendedParameterAddressRequirements;
-    param.Arg.Pointer = &reqs;
-    void* p = (*pVirtualAlloc2)(GetCurrentProcess(), addr, size, flags, PAGE_READWRITE, &param, 1);
-    if (p != NULL) return p;
-    _mi_warning_message("unable to allocate aligned OS memory (%zu bytes, error code: 0x%x, address: %p, alignment: %zu, flags: 0x%x)\n", size, GetLastError(), addr, try_alignment, flags);
-    // fall through on error
-  }
-  // last resort
-  return VirtualAlloc(addr, size, flags, PAGE_READWRITE);
+  return WeirdVirtualAlloc(addr, size, flags, PAGE_READWRITE);
 }
 
 static void* win_virtual_alloc(void* addr, size_t size, size_t try_alignment, DWORD flags, bool large_only, bool allow_large, bool* is_large) {
@@ -271,13 +249,13 @@ int _mi_prim_commit(void* addr, size_t size, bool* is_zero) {
   }
   */
   // commit
-  void* p = VirtualAlloc(addr, size, MEM_COMMIT, PAGE_READWRITE);
+  void* p = WeirdVirtualAlloc(addr, size, MEM_COMMIT, PAGE_READWRITE);
   if (p == NULL) return (int)GetLastError();
   return 0;
 }
 
 int _mi_prim_decommit(void* addr, size_t size, bool* needs_recommit) {  
-  BOOL ok = VirtualFree(addr, size, MEM_DECOMMIT);
+  BOOL ok = WeirdVirtualFree(addr, size, MEM_DECOMMIT);
   *needs_recommit = true;  // for safety, assume always decommitted even in the case of an error.
   return (ok ? 0 : (int)GetLastError());
 }
